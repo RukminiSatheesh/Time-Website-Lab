@@ -1,0 +1,595 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Underwater Clock</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html,body { width:100%; height:100%; overflow:hidden; background:#0b4053; }
+canvas { display:block; width:100%; height:100%; }
+</style>
+</head>
+<body>
+<canvas id="ocean"></canvas>
+
+<script>
+const canvas = document.getElementById("ocean");
+const ctx = canvas.getContext("2d");
+
+let W, H, DPR;
+
+function resize() {
+  W = innerWidth;
+  H = innerHeight;
+  DPR = devicePixelRatio || 1;
+  canvas.width = W * DPR;
+  canvas.height = H * DPR;
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+resize();
+addEventListener("resize", resize);
+
+
+// ---------------- DIVER ----------------
+
+const diver = new Image();
+diver.src = "Up Swim.png";
+
+let frame = 0;
+let frameTime = 0;
+
+function drawDiver(time) {
+  if (!diver.complete || !diver.naturalWidth) return;
+
+  if (time - frameTime > 130) {
+    frame = (frame + 1) % 6;
+    frameTime = time;
+  }
+
+  const size = Math.min(180, W * 0.34, H * 0.3);
+
+  ctx.drawImage(
+    diver, frame * 90, 0, 90, 90,
+    W * 0.055, H * 0.62, size, size
+  );
+}
+
+
+// ---------------- SEABED ----------------
+
+function drawSand() {
+  const gradient = ctx.createLinearGradient(0,H*.87,0,H);
+  gradient.addColorStop(0,"#b9a37e");
+  gradient.addColorStop(.35,"#a48e6c");
+  gradient.addColorStop(1,"#776d59");
+
+  ctx.beginPath();
+  ctx.moveTo(0,H*.94);
+  ctx.bezierCurveTo(W*.13,H*.87,W*.24,H*.91,W*.38,H*.94);
+  ctx.bezierCurveTo(W*.55,H*.99,W*.68,H*.88,W*.79,H*.91);
+  ctx.bezierCurveTo(W*.91,H*.92,W*.96,H*.96,W,H*.93);
+  ctx.lineTo(W,H);
+  ctx.lineTo(0,H);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(0,H*.94);
+  ctx.bezierCurveTo(W*.13,H*.87,W*.24,H*.91,W*.38,H*.94);
+  ctx.bezierCurveTo(W*.55,H*.99,W*.68,H*.88,W*.79,H*.91);
+  ctx.bezierCurveTo(W*.91,H*.92,W*.96,H*.96,W,H*.93);
+  ctx.strokeStyle="rgba(239,220,181,.4)";
+  ctx.lineWidth=2;
+  ctx.stroke();
+
+  // Sand grains
+  for(let i=0;i<65;i++){
+    const x=((i*83)%997)/997*W;
+    const y=H*(.925+((i*17)%65)/650);
+    ctx.beginPath();
+    ctx.arc(x,y,.7+(i%3)*.3,0,Math.PI*2);
+    ctx.fillStyle="rgba(245,224,184,.25)";
+    ctx.fill();
+  }
+}
+
+
+// ---------------- BACKGROUND ----------------
+
+function drawBackground(time) {
+  const water=ctx.createLinearGradient(0,0,0,H);
+  water.addColorStop(0,"#155a6d");
+  water.addColorStop(.35,"#10485c");
+  water.addColorStop(.72,"#0a394e");
+  water.addColorStop(1,"#082d40");
+
+  ctx.fillStyle=water;
+  ctx.fillRect(0,0,W,H);
+
+  const glow=ctx.createRadialGradient(W*.57,0,0,W*.57,H*.1,H*.85);
+  glow.addColorStop(0,"rgba(239,246,220,.2)");
+  glow.addColorStop(.4,"rgba(180,220,211,.07)");
+  glow.addColorStop(1,"rgba(180,220,211,0)");
+
+  ctx.fillStyle=glow;
+  ctx.fillRect(0,0,W,H);
+
+  // Diffused sunlight rays
+  ctx.save();
+  ctx.globalCompositeOperation="screen";
+
+  [
+    [.34,.13,.035],
+    [.49,.17,.05],
+    [.65,.11,.04],
+    [.77,.15,.025]
+  ].forEach(([x,spread,opacity],i)=>{
+    const sway=Math.sin(time*.00025+i*1.7)*.012;
+    const top=W*(x+sway);
+    const bottom=top+W*spread;
+    const beam=ctx.createLinearGradient(top,0,bottom,H*.85);
+    beam.addColorStop(0,`rgba(235,249,221,${opacity})`);
+    beam.addColorStop(.6,`rgba(196,229,215,${opacity*.5})`);
+    beam.addColorStop(1,"rgba(196,229,215,0)");
+
+    ctx.beginPath();
+    ctx.moveTo(top-W*.018,0);
+    ctx.lineTo(top+W*.018,0);
+    ctx.lineTo(bottom+W*.07,H*.88);
+    ctx.lineTo(bottom-W*.07,H*.88);
+    ctx.closePath();
+    ctx.fillStyle=beam;
+    ctx.fill();
+  });
+
+  ctx.restore();
+  drawSand();
+}
+
+
+// ---------------- BUBBLE SYSTEM ----------------
+
+let hourBubbles=[];
+let minuteBubbles=[];
+let secondBubbles=[];
+let merges=[];
+let pendingHourMerge=false;
+
+function allBubbles() {
+  return [...hourBubbles,...minuteBubbles,...secondBubbles];
+}
+
+function radiusFor(type) {
+  if(type==="second") return 3.2+Math.random()*2.5;
+  if(type==="minute") return 10+Math.random()*4;
+  return 22+Math.random()*6;
+}
+
+// All new bubbles start at the seabed.
+// They rise to a randomly scattered destination.
+function makeBubble(type, rising=true) {
+  const x=.12+Math.random()*.82;
+  const y=.08+Math.random()*.76;
+
+  return {
+    type,
+    x,
+    y,
+    r:radiusFor(type),
+    phase:Math.random()*Math.PI*2,
+    wobble:.004+Math.random()*.009,
+    speed:.75+Math.random()*.65,
+    rising,
+    born:rising?performance.now():0,
+    fromX:.04+Math.random()*.92,
+    fromY:.925+Math.random()*.045,
+    duration:3500+Math.random()*3500
+  };
+}
+
+
+// ---------------- NATURAL BUBBLE LOOK ----------------
+
+function drawBubble(b,x,y,r) {
+  if(r<=0)return;
+
+  const px=x*W;
+  const py=y*H;
+
+  ctx.save();
+
+  // Transparent interior
+  ctx.beginPath();
+  ctx.arc(px,py,r,0,Math.PI*2);
+  ctx.fillStyle="rgba(207,242,248,.025)";
+  ctx.fill();
+
+  // Fine rim
+  ctx.lineWidth=Math.max(.7,r*.045);
+  ctx.strokeStyle="rgba(225,249,251,.65)";
+  ctx.stroke();
+
+  // Small curved reflection
+  ctx.beginPath();
+  ctx.arc(px-r*.12,py-r*.08,r*.79,Math.PI*1.13,Math.PI*1.58);
+  ctx.lineWidth=Math.max(.65,r*.07);
+  ctx.strokeStyle="rgba(255,255,255,.62)";
+  ctx.stroke();
+
+  // Tiny glint
+  ctx.beginPath();
+  ctx.ellipse(px-r*.29,py-r*.34,r*.12,r*.055,-.5,0,Math.PI*2);
+  ctx.fillStyle="rgba(255,255,255,.8)";
+  ctx.fill();
+
+  ctx.restore();
+}
+
+
+// ---------------- DRAW BUBBLES ----------------
+
+function drawCollection(collection,time) {
+  for(const b of collection) {
+    let x=b.x;
+    let y=b.y;
+
+    if(b.rising) {
+      const progress=Math.min(1,(time-b.born)/b.duration);
+      const eased=progress*progress*(3-2*progress);
+
+      // Individual wobble while rising.
+      const sideways=Math.sin(progress*Math.PI*3+b.phase)*b.wobble;
+
+      x=b.fromX+(b.x-b.fromX)*eased+sideways;
+      y=b.fromY+(b.y-b.fromY)*eased;
+
+      x+=Math.sin(time*.003*b.speed+b.phase)*.002;
+      y+=Math.sin(time*.002+b.phase)*.001;
+
+      if(progress>=1) {
+        b.rising=false;
+        b.born=0;
+      }
+    } else {
+      // Barely noticeable hover around a fixed position.
+      x+=Math.sin(time*.0008+b.phase)*.001;
+      y+=Math.sin(time*.001+b.phase)*.0012;
+    }
+
+    drawBubble(b,x,y,b.r);
+  }
+}
+
+
+// ---------------- MERGING ----------------
+
+function startMerge(sources,type,callback) {
+  if(!sources.length)return;
+
+  const target=makeBubble(type,false);
+
+  merges.push({
+    sources:[...sources],
+    target,
+    start:performance.now(),
+    duration:950,
+    callback
+  });
+}
+
+function drawMerges(time) {
+  for(let i=merges.length-1;i>=0;i--) {
+    const merge=merges[i];
+    const progress=Math.min(1,(time-merge.start)/merge.duration);
+    const eased=progress*progress*(3-2*progress);
+
+    for(const b of merge.sources) {
+      const wobble=Math.sin(time*.008+b.phase)*.003;
+      const x=b.x+(merge.target.x-b.x)*eased+wobble;
+      const y=b.y+(merge.target.y-b.y)*eased;
+
+      drawBubble(b,x,y,Math.max(.2,b.r*(1-eased*.9)));
+    }
+
+    drawBubble(
+      merge.target,
+      merge.target.x,
+      merge.target.y,
+      merge.target.r*Math.min(1,eased*1.15)
+    );
+
+    if(progress>=1) {
+      merges.splice(i,1);
+      merge.callback(merge.target);
+    }
+  }
+}
+
+function completeMinute() {
+  const old=secondBubbles.splice(0);
+
+  startMerge(old,"minute",bubble=>{
+    minuteBubbles.push(bubble);
+
+    if(pendingHourMerge && minuteBubbles.length>=60) {
+      pendingHourMerge=false;
+      completeHour();
+    }
+  });
+}
+
+function completeHour() {
+  const old=minuteBubbles.splice(0);
+
+  startMerge(old,"hour",bubble=>{
+    hourBubbles.push(bubble);
+  });
+}
+
+
+// ---------------- INITIAL TIME ----------------
+
+function dateKey(d) {
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+function initialize(date) {
+  hourBubbles=[];
+  minuteBubbles=[];
+  secondBubbles=[];
+  merges=[];
+  pendingHourMerge=false;
+
+  for(let i=0;i<date.getHours();i++)
+    hourBubbles.push(makeBubble("hour",false));
+
+  for(let i=0;i<date.getMinutes();i++)
+    minuteBubbles.push(makeBubble("minute",false));
+
+  for(let i=0;i<date.getSeconds();i++)
+    secondBubbles.push(makeBubble("second",false));
+}
+
+
+// ---------------- CLOCK ----------------
+
+let lastSecond=Math.floor(Date.now()/1000);
+let today=dateKey(new Date());
+
+initialize(new Date());
+
+function updateClock() {
+  const now=Math.floor(Date.now()/1000);
+  const date=new Date(now*1000);
+
+  if(dateKey(date)!==today) {
+    today=dateKey(date);
+    initialize(date);
+    lastSecond=now;
+    return;
+  }
+
+  if(now-lastSecond>120) {
+    initialize(date);
+    lastSecond=now;
+    return;
+  }
+
+  for(let t=lastSecond+1;t<=now;t++) {
+    const d=new Date(t*1000);
+
+    // New bubble rises from the seabed every second.
+    secondBubbles.push(makeBubble("second",true));
+
+    if(d.getSeconds()===0) {
+      if(d.getMinutes()===0) pendingHourMerge=true;
+      completeMinute();
+    }
+  }
+
+  lastSecond=now;
+}
+
+
+// ---------------- ANIMATION ----------------
+
+function animate(time) {
+  drawBackground(time);
+
+  drawCollection(hourBubbles,time);
+  drawCollection(minuteBubbles,time);
+  drawCollection(secondBubbles,time);
+
+  drawMerges(time);
+  drawDiver(time);
+
+  requestAnimationFrame(animate);
+}
+
+setInterval(updateClock,200);
+requestAnimationFrame(animate);
+
+
+function drawBackground(time) {
+  // Deep, clear turquoise water
+  const water = ctx.createLinearGradient(0, 0, 0, H);
+  water.addColorStop(0, "#398b91");
+  water.addColorStop(0.25, "#236f7d");
+  water.addColorStop(0.65, "#104c63");
+  water.addColorStop(1, "#092f43");
+
+  ctx.fillStyle = water;
+  ctx.fillRect(0, 0, W, H);
+
+  // Soft sunlight filtering down from the surface
+  const glow = ctx.createRadialGradient(
+    W * 0.5, H * -0.08, 0,
+    W * 0.5, H * 0.08, H * 0.95
+  );
+
+  glow.addColorStop(0, "rgba(255, 248, 220, 0.34)");
+  glow.addColorStop(0.3, "rgba(206, 242, 220, 0.16)");
+  glow.addColorStop(0.7, "rgba(156, 219, 213, 0.045)");
+  glow.addColorStop(1, "rgba(156, 219, 213, 0)");
+
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, W, H);
+
+  // Very soft, irregular underwater light movement
+  ctx.save();
+  ctx.globalCompositeOperation = "screen";
+
+  for (let i = 0; i < 24; i++) {
+    const phase = time * 0.00035 + i * 1.73;
+
+    const x = W * (
+      0.08 + ((i * 0.173) % 0.84) +
+      Math.sin(phase) * 0.025
+    );
+
+    const y = H * (
+      0.12 + ((i * 0.137) % 0.72) +
+      Math.cos(phase * 0.7) * 0.018
+    );
+
+    const radius = H * (0.035 + (i % 5) * 0.012);
+
+    const patch = ctx.createRadialGradient(
+      x, y, 0,
+      x, y, radius
+    );
+
+    patch.addColorStop(0, "rgba(230, 250, 225, 0.075)");
+    patch.addColorStop(0.45, "rgba(205, 241, 221, 0.035)");
+    patch.addColorStop(1, "rgba(205, 241, 221, 0)");
+
+    ctx.fillStyle = patch;
+    ctx.fillRect(
+      x - radius,
+      y - radius,
+      radius * 2,
+      radius * 2
+    );
+  }
+
+  // Faint, flowing caustic ripples
+  ctx.filter = "blur(7px)";
+  ctx.lineWidth = Math.max(1, W * 0.0018);
+  ctx.strokeStyle = "rgba(225, 248, 221, 0.09)";
+
+  for (let i = 0; i < 11; i++) {
+    const phase = time * 0.00045 + i * 1.9;
+    const x = W * (0.08 + (i % 6) * 0.17);
+    const y = H * (0.18 + Math.floor(i / 6) * 0.36);
+
+    ctx.beginPath();
+    ctx.moveTo(x - W * 0.08, y);
+
+    ctx.bezierCurveTo(
+      x - W * 0.035,
+      y + Math.sin(phase) * H * 0.035,
+      x + W * 0.035,
+      y + Math.cos(phase) * H * 0.045,
+      x + W * 0.09,
+      y + Math.sin(phase * 0.8) * H * 0.025
+    );
+
+    ctx.stroke();
+  }
+
+  ctx.restore();
+  ctx.filter = "none";
+
+  drawSand();
+}
+
+
+function drawBackground(time) {
+  const water = ctx.createLinearGradient(0, 0, 0, H);
+  water.addColorStop(0, "#398b91");
+  water.addColorStop(0.25, "#236f7d");
+  water.addColorStop(0.65, "#104c63");
+  water.addColorStop(1, "#092f43");
+
+  ctx.fillStyle = water;
+  ctx.fillRect(0, 0, W, H);
+
+  // Soft sunlight glow
+  const glow = ctx.createRadialGradient(
+    W * 0.5, 0, 0,
+    W * 0.5, H * 0.12, H * 0.95
+  );
+  glow.addColorStop(0, "rgba(255,248,220,0.38)");
+  glow.addColorStop(0.35, "rgba(206,242,220,0.15)");
+  glow.addColorStop(1, "rgba(156,219,213,0)");
+
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.globalCompositeOperation = "screen";
+
+  // A handful of broad, soft, naturally wavering sunbeams
+  for (let i = 0; i < 5; i++) {
+    const phase = time * 0.00016 + i * 1.8;
+    const topX = W * (0.19 + i * 0.15);
+    const bottomX = topX + Math.sin(phase) * W * 0.09;
+    const width = W * (0.045 + (i % 3) * 0.018);
+
+    const beam = ctx.createLinearGradient(
+      topX, 0, bottomX, H * 0.88
+    );
+
+    beam.addColorStop(0, "rgba(255,248,220,0.10)");
+    beam.addColorStop(0.4, "rgba(222,245,220,0.055)");
+    beam.addColorStop(1, "rgba(190,232,220,0)");
+
+    ctx.fillStyle = beam;
+    ctx.beginPath();
+    ctx.moveTo(topX - width * 0.35, 0);
+    ctx.bezierCurveTo(
+      topX + width, H * 0.25,
+      bottomX - width * 0.6, H * 0.58,
+      bottomX + width * 1.5, H * 0.88
+    );
+    ctx.lineTo(bottomX - width * 1.5, H * 0.88);
+    ctx.bezierCurveTo(
+      bottomX - width * 0.4, H * 0.55,
+      topX - width, H * 0.25,
+      topX - width * 0.35, 0
+    );
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Soft drifting underwater light patches
+  for (let i = 0; i < 24; i++) {
+    const phase = time * 0.00035 + i * 1.73;
+    const x = W * (0.08 + ((i * 0.173) % 0.84) +
+      Math.sin(phase) * 0.025);
+    const y = H * (0.12 + ((i * 0.137) % 0.72) +
+      Math.cos(phase * 0.7) * 0.018);
+    const radius = H * (0.035 + (i % 5) * 0.012);
+
+    const patch = ctx.createRadialGradient(
+      x, y, 0, x, y, radius
+    );
+    patch.addColorStop(0, "rgba(230,250,225,0.075)");
+    patch.addColorStop(0.45, "rgba(205,241,221,0.035)");
+    patch.addColorStop(1, "rgba(205,241,221,0)");
+
+    ctx.fillStyle = patch;
+    ctx.fillRect(x-radius, y-radius, radius*2, radius*2);
+  }
+
+  ctx.restore();
+  drawSand();
+}
+
+
+</script>
+</body>
+</html>
